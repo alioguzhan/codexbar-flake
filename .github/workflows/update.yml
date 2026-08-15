@@ -1,0 +1,57 @@
+name: update
+
+# Upstream releases near-daily and at no fixed hour, so poll every 6 hours to
+# keep the worst-case lag at 6h rather than 24h.
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Bump release.json
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ./update.sh
+
+      - name: Stop if nothing changed
+        id: changed
+        run: |
+          if git diff --quiet -- release.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The gate. installCheckPhase runs `codexbar --help` and greps for the
+      # new version, so a bad hash, a broken binary or a dropped resource
+      # bundle fails here and never reaches main.
+      - name: Build
+        if: steps.changed.outputs.changed == 'true'
+        run: nix build --print-build-logs .#codexbar-cli
+
+      - name: Commit
+        if: steps.changed.outputs.changed == 'true'
+        run: |
+          version=$(jq -r '.version' release.json)
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add release.json
+          git commit -m "chore: CodexBar CLI ${version}"
+          git push
